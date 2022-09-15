@@ -1,10 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.IO;
 using System.Reflection;
-using System.Security.Cryptography.X509Certificates;
-using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Identity;
@@ -14,27 +11,21 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
-using Microsoft.IdentityModel.Tokens;
 using IdentityServer4.Services;
 using StsServerIdentity.Models;
 using StsServerIdentity.Data;
 using StsServerIdentity.Resources;
 using StsServerIdentity.Services;
 using StsServerIdentity.Filters;
-using StsServerIdentity.Services.Certificate;
 using Serilog;
 using Microsoft.AspNetCore.Http;
 using Fido2NetLib;
 using Microsoft.IdentityModel.Logging;
-using Microsoft.AspNetCore.Authentication.OpenIdConnect;
-using Microsoft.AspNetCore.Authentication;
 
 namespace StsServerIdentity
 {
     public class Startup
     {
-        private string _clientId = "xxxxxx";
-        private string _clientSecret = "xxxxx";
         private IConfiguration _configuration { get; }
         private IWebHostEnvironment _environment { get; }
 
@@ -46,12 +37,6 @@ namespace StsServerIdentity
 
         public void ConfigureServices(IServiceCollection services)
         {
-            services.Configure<AuthConfigurations>(_configuration.GetSection("AuthConfigurations"));
-            services.Configure<EmailSettings>(_configuration.GetSection("EmailSettings"));
-            services.AddTransient<IProfileService, IdentityWithAdditionalClaimsProfileService>();
-            services.AddTransient<IEmailSender, EmailSender>();
-
-            var authConfiguration = _configuration.GetSection("AuthConfigurations");
             var authSecretsConfiguration = _configuration.GetSection("AuthSecretsConfigurations");
             services.Configure<CookiePolicyOptions>(options =>
             {
@@ -62,14 +47,7 @@ namespace StsServerIdentity
                     CheckSameSite(cookieContext.Context, cookieContext.CookieOptions);
             });
 
-            _clientId = _configuration["MicrosoftClientId"];
-            _clientSecret = _configuration["MircosoftClientSecret"];
             var authConfigurations = _configuration.GetSection("AuthConfigurations");
-            var useLocalCertStore = Convert.ToBoolean(_configuration["UseLocalCertStore"]);
-            var certificateThumbprint = _configuration["CertificateThumbprint"];
-
-            var x509Certificate2Certs = GetCertificates(_environment, _configuration)
-               .GetAwaiter().GetResult();
 
             services.AddDbContext<ApplicationDbContext>(options =>
                 options.UseSqlite(_configuration.GetConnectionString("DefaultConnection")));
@@ -85,7 +63,7 @@ namespace StsServerIdentity
                 .AddDefaultTokenProviders()
                 .AddTokenProvider<Fifo2UserTwoFactorTokenProvider>("FIDO2");
 
-            var vueJsApiUrl = authConfiguration["VueJsApiUrl"];
+            var vueJsApiUrl = authConfigurations["VueJsApiUrl"];
 			
 			services.AddCors(options =>
             {
@@ -101,47 +79,7 @@ namespace StsServerIdentity
                     });
             });
 
-            if (_clientId != null)
-            {
-                services.AddAuthentication()
-                 .AddOpenIdConnect("Azure AD / Microsoft", "Azure AD / Microsoft", options => // Microsoft common
-                 {
-                     //  https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration
-                     options.ClientId = _clientId;
-                     options.ClientSecret = _clientSecret;
-                     options.SignInScheme = "Identity.External";
-                     options.RemoteAuthenticationTimeout = TimeSpan.FromSeconds(30);
-                     options.Authority = "https://login.microsoftonline.com/common/v2.0/";
-                     options.ResponseType = "code";
-                     options.UsePkce = false; // live does not support this yet
-                     options.Scope.Add("profile");
-                     options.Scope.Add("email");
-                     options.ClaimActions.MapUniqueJsonKey("preferred_username", "preferred_username");
-                     options.ClaimActions.MapAll(); // ClaimActions.MapUniqueJsonKey("amr", "amr");
-                     //options.ClaimActions.Remove("amr");
-                     options.GetClaimsFromUserInfoEndpoint = true;
-                     options.TokenValidationParameters = new TokenValidationParameters
-                     {
-                         ValidateIssuer = false,
-                         NameClaimType = "email",
-                     };
-                     options.CallbackPath = "/signin-microsoft";
-                     options.Prompt = "login"; // login, consent
-                     options.Events = new OpenIdConnectEvents
-                     {
-                         OnRedirectToIdentityProvider = context =>
-                         {
-                             context.ProtocolMessage.SetParameter("acr_values", "mfa");
-
-                             return Task.FromResult(0);
-                         }
-                     };
-                 });
-            }
-            else
-            {
-                services.AddAuthentication();
-            }
+            services.AddAuthentication();
 
             services.AddControllersWithViews(options =>
                 {
@@ -158,20 +96,24 @@ namespace StsServerIdentity
                 })
                 .AddNewtonsoftJson();
 
-            services.AddIdentityServer(options =>
+            var builder = services.AddIdentityServer(options =>
                 {
                     options.Events.RaiseErrorEvents = true;
                     options.Events.RaiseInformationEvents = true;
                     options.Events.RaiseFailureEvents = true;
                     options.Events.RaiseSuccessEvents = true;
                 })
-                .AddSigningCredential(x509Certificate2Certs.ActiveCertificate)
+                // .AddSigningCredential(x509Certificate2Certs.ActiveCertificate)
                 .AddInMemoryIdentityResources(Config.GetIdentityResources())
                 .AddInMemoryApiResources(Config.GetApiResources())
                 .AddInMemoryApiScopes(Config.GetApiScopes())
                 .AddInMemoryClients(Config.GetClients())
                 .AddAspNetIdentity<ApplicationUser>()
                 .AddProfileService<IdentityWithAdditionalClaimsProfileService>();
+            if (_environment.IsDevelopment())
+            {
+                builder.AddDeveloperSigningCredential();
+            }
 
             services.Configure<Fido2Configuration>(_configuration.GetSection("fido2"));
             services.Configure<Fido2MdsConfiguration>(_configuration.GetSection("fido2mds"));
@@ -230,30 +172,6 @@ namespace StsServerIdentity
                     pattern: "{controller=Home}/{action=Index}/{id?}");
             });
         }
-
-        private static async Task<(X509Certificate2 ActiveCertificate, X509Certificate2 SecondaryCertificate)> GetCertificates(IWebHostEnvironment environment, IConfiguration configuration)
-        {
-            var certificateConfiguration = new CertificateConfiguration
-            {
-                // Use an Azure key vault
-                CertificateNameKeyVault = configuration["CertificateNameKeyVault"], //"StsCert",
-                KeyVaultEndpoint = configuration["AzureKeyVaultEndpoint"], // "https://damienbod.vault.azure.net"
-
-                // Use a local store with thumbprint
-                //UseLocalCertStore = Convert.ToBoolean(configuration["UseLocalCertStore"]),
-                //CertificateThumbprint = configuration["CertificateThumbprint"],
-
-                // development certificate
-                DevelopmentCertificatePfx = Path.Combine(environment.ContentRootPath, "sts_dev_cert.pfx"),
-                DevelopmentCertificatePassword = "1234" //configuration["DevelopmentCertificatePassword"] //"1234",
-            };
-
-            (X509Certificate2 ActiveCertificate, X509Certificate2 SecondaryCertificate) certs = await CertificateService.GetCertificates(
-                certificateConfiguration).ConfigureAwait(false);
-
-            return certs;
-        }
-
         private static void AddLocalizationConfigurations(IServiceCollection services)
         {
             services.AddSingleton<LocService>();

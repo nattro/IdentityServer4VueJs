@@ -38,6 +38,9 @@ namespace StsServerIdentity
             claims.Add(new Claim(JwtClaimTypes.Role, "dataEventRecords"));
             claims.Add(new Claim(JwtClaimTypes.Scope, "dataEventRecords"));
 
+            claims.Add(new Claim(JwtClaimTypes.Role, "betsTalkService.user"));
+            claims.Add(new Claim(JwtClaimTypes.Role, "betsTalkService"));
+            claims.Add(new Claim(JwtClaimTypes.Scope, "betsTalkService"));
             if (user.IsAdmin)
             {
                 claims.Add(new Claim(JwtClaimTypes.Role, "admin"));
